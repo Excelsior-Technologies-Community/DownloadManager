@@ -16,7 +16,7 @@ Supports large files, resume after app restart/pause, works in background, and s
 | ![Paused](app/src/main/assets/img1.png) | ![Completed](app/src/main/assets/img2.png) |
 
 ### Demo Video
-![Demo](app/src/main/assets/gif.gif)
+<img src="app/src/main/assets/gif.gif" height="320"/>
 
 ---
 ## Features
@@ -59,7 +59,7 @@ allprojects {
 
 ```gradle
 dependencies {
-    implementation 'com.github.YourUsername:DownloadManager:1.0.0'
+        implementation("com.github.Excelsior-Technologies-Community:DownloadManager:1.0.0")
 }
 ```
 ---
