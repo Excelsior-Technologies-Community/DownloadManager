@@ -6,9 +6,7 @@ import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.net.Uri
 import android.os.Build
-import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.content.FileProvider
 import java.io.File
@@ -17,129 +15,156 @@ object NotificationHelper {
 
     private const val TAG = "NotificationHelper"
     const val CHANNEL_ID = "download_channel"
-    const val CHANNEL_NAME = "Downloads"
     const val NOTIF_ID = 1001
+
+    // Action constants
+    const val ACTION_PAUSE = "download_manager.action.PAUSE"
+    const val ACTION_RESUME = "download_manager.action.RESUME"
+    const val ACTION_CANCEL = "download_manager.action.CANCEL"
 
     fun createChannel(context: Context) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
                 CHANNEL_ID,
-                CHANNEL_NAME,
+                "Downloads",
                 NotificationManager.IMPORTANCE_LOW
             ).apply {
-                description = "Download progress notifications"
-                setShowBadge(false)
+                description = "Shows download progress and controls"
+                setShowBadge(true)
+                enableLights(false)
+                enableVibration(false)
             }
-
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.createNotificationChannel(channel)
-            Log.d(TAG, "Notification channel created")
+            val manager = context.getSystemService(NotificationManager::class.java)
+            manager.createNotificationChannel(channel)
         }
     }
 
-    fun buildProgressNotification(
+    fun buildDownloadNotification(
         context: Context,
-        title: String,
-        progressPercent: Int,
-        indeterminate: Boolean
+        filename: String,
+        progress: Int,
+        isIndeterminate: Boolean,
+        isPaused: Boolean,
+        filePath: String? = null  // only when completed
     ): Notification {
 
-        val openIntent = context.packageManager
-            .getLaunchIntentForPackage(context.packageName)
+        // Correctly define pause/resume action inside the function
+        val pauseResumeAction = if (isPaused) {
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_play,
+                "Resume",
+                getPendingIntent(context, ACTION_RESUME)
+            )
+        } else {
+            NotificationCompat.Action(
+                android.R.drawable.ic_media_pause,
+                "Pause",
+                getPendingIntent(context, ACTION_PAUSE)
+            )
+        }
 
-        val piOpen = PendingIntent.getActivity(
-            context, 0, openIntent,
-            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val cancelAction = NotificationCompat.Action(
+            android.R.drawable.ic_delete,
+            "Cancel",
+            getPendingIntent(context, ACTION_CANCEL)
         )
 
         val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-            .setContentTitle("Downloading")
-            .setContentText(title)
             .setSmallIcon(android.R.drawable.stat_sys_download)
-            .setContentIntent(piOpen)
-            .setOnlyAlertOnce(true)
+            .setContentTitle("Downloading")
+            .setContentText(filename)
             .setOngoing(true)
+            .setOnlyAlertOnce(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
-            .setCategory(NotificationCompat.CATEGORY_PROGRESS)
+            .setProgress(100, progress, isIndeterminate)
+            .apply {
+                if (progress in 1..99) setSubText("$progress%")
+            }
+            .addAction(pauseResumeAction)
+            .addAction(cancelAction)
 
-        if (indeterminate) {
-            builder.setProgress(100, 0, true)
-        } else {
-            builder.setProgress(100, progressPercent, false)
-                .setSubText("$progressPercent%")
+        // When download is complete → show "View" button
+        if (filePath != null && File(filePath).exists()) {
+            val file = File(filePath)
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+
+            val viewIntent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, getMimeType(file.name))
+                flags = Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+
+            val viewPendingIntent = PendingIntent.getActivity(
+                context,
+                0,
+                viewIntent,
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            )
+
+            builder
+                .setContentTitle("Download Complete")
+                .setContentText(filename)
+                .setSmallIcon(android.R.drawable.stat_sys_download_done)
+                .setProgress(0, 0, false)
+                .setOngoing(false)
+                .setAutoCancel(true)
+                .clearActions()
+                .addAction(
+                    NotificationCompat.Action(
+                        android.R.drawable.ic_menu_view,
+                        "View",
+                        viewPendingIntent
+                    )
+                )
+                .setContentIntent(viewPendingIntent)
         }
 
         return builder.build()
     }
 
-    fun updateProgress(context: Context, title: String, percent: Int, indeterminate: Boolean) {
-        try {
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(
-                NOTIF_ID,
-                buildProgressNotification(context, title, percent, indeterminate)
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to update notification", e)
-        }
+    fun updateNotification(
+        context: Context,
+        filename: String,
+        progress: Int = 0,
+        isIndeterminate: Boolean = true,
+        isPaused: Boolean = false,
+        filePath: String? = null
+    ) {
+        val notification = buildDownloadNotification(
+            context = context,
+            filename = filename,
+            progress = progress,
+            isIndeterminate = isIndeterminate,
+            isPaused = isPaused,
+            filePath = filePath
+        )
+        val manager = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        manager.notify(NOTIF_ID, notification)
     }
 
-    fun showCompleted(context: Context, title: String, filePath: String) {
-        try {
-            val file = File(filePath)
-
-            if (!file.exists()) {
-                Log.e(TAG, "Downloaded file does not exist: $filePath")
-                return
-            }
-
-            val authority = "${context.packageName}.fileprovider"
-            val uri: Uri = FileProvider.getUriForFile(context, authority, file)
-
-            val openIntent = Intent(Intent.ACTION_VIEW).apply {
-                setDataAndType(uri, getMimeType(file.name))
-                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-            }
-
-            val pi = PendingIntent.getActivity(
-                context, 0, openIntent,
-                PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
-            )
-
-            val notif = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setContentTitle("Download Complete")
-                .setContentText(title)
-                .setSubText("Tap to open")
-                .setSmallIcon(android.R.drawable.stat_sys_download_done)
-                .setContentIntent(pi)
-                .setAutoCancel(true)
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setCategory(NotificationCompat.CATEGORY_STATUS)
-                .build()
-
-            val nm = context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-            nm.notify(NOTIF_ID, notif)
-
-            Log.d(TAG, "Completion notification shown for: $title at $filePath")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to show completion notification", e)
+    private fun getPendingIntent(context: Context, action: String): PendingIntent {
+        val intent = Intent(action).apply {
+            setPackage(context.packageName) // Required on Android 12+
         }
+        return PendingIntent.getBroadcast(
+            context,
+            action.hashCode(),
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
     }
 
-    private fun getMimeType(filename: String): String {
-        return when {
-            filename.endsWith(".pdf", ignoreCase = true) -> "application/pdf"
-            filename.endsWith(".zip", ignoreCase = true) -> "application/zip"
-            filename.endsWith(".jpg", ignoreCase = true) ||
-                    filename.endsWith(".jpeg", ignoreCase = true) -> "image/jpeg"
-
-            filename.endsWith(".png", ignoreCase = true) -> "image/png"
-            filename.endsWith(".mp4", ignoreCase = true) -> "video/mp4"
-            filename.endsWith(".mp3", ignoreCase = true) -> "audio/mpeg"
-            filename.endsWith(".txt", ignoreCase = true) -> "text/plain"
-            else -> "*/*"
-        }
+    private fun getMimeType(filename: String): String = when {
+        filename.endsWith(".pdf", true) -> "application/pdf"
+        filename.endsWith(".zip", true) -> "application/zip"
+        filename.endsWith(".jpg", true) || filename.endsWith(".jpeg", true) -> "image/jpeg"
+        filename.endsWith(".png", true) -> "image/png"
+        filename.endsWith(".mp4", true) -> "video/mp4"
+        filename.endsWith(".mp3", true) -> "audio/mpeg"
+        filename.endsWith(".txt", true) -> "text/plain"
+        else -> "*/*"
     }
 }
-

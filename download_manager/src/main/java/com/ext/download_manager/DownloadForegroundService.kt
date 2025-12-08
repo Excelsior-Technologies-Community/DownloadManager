@@ -14,6 +14,7 @@ class DownloadForegroundService : Service() {
         const val TAG = "DownloadService"
         const val ACTION_START = "download_manager.action.START"
         const val ACTION_PAUSE = "download_manager.action.PAUSE"
+        const val ACTION_RESUME = "download_manager.action.RESUME"
         const val ACTION_CANCEL = "download_manager.action.CANCEL"
 
         const val EXTRA_URL = "extra_url"
@@ -26,176 +27,195 @@ class DownloadForegroundService : Service() {
     }
 
     private var serviceJob: Job? = null
-    private val pauseFlag = AtomicBoolean(false)
-    private val cancelFlag = AtomicBoolean(false)
+    private val pauseRequested = AtomicBoolean(false)
+    private val cancelRequested = AtomicBoolean(false)
     private val downloader = Downloader()
 
-    override fun onBind(intent: Intent?): IBinder? = null
-
-    override fun onCreate() {
-        super.onCreate()
-        Log.d(TAG, "Service onCreate")
-        NotificationHelper.createChannel(this)
-    }
+    // These must survive pause/resume
+    private var currentUrl: String? = null
+    private var currentFilename: String? = null
+    private var currentFile: File? = null
+    private var downloadedSoFar = 0L
+    private var totalSize = 0L
+    private var isPaused = false
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         Log.d(TAG, "onStartCommand: ${intent?.action}")
 
         when (intent?.action) {
             ACTION_START -> {
-                val url = intent.getStringExtra(EXTRA_URL)
-                if (url.isNullOrEmpty()) {
-                    Log.e(TAG, "URL is null or empty")
-                    return START_NOT_STICKY
-                }
-                val fileName = intent.getStringExtra(EXTRA_FILENAME)
-                    ?: url.substringAfterLast("/")
-                        .ifEmpty { "download_${System.currentTimeMillis()}" }
+                val url = intent.getStringExtra(EXTRA_URL) ?: return START_NOT_STICKY
+                val filename = intent.getStringExtra(EXTRA_FILENAME)
+                    ?: url.substringAfterLast("/").ifEmpty { "file_${System.currentTimeMillis()}" }
 
-                Log.d(TAG, "Starting download: $url -> $fileName")
-                startDownload(url, fileName)
+                currentUrl = url
+                currentFilename = filename
+                downloadedSoFar = 0L
+                totalSize = 0L
+                isPaused = false
+
+                startDownload(url, filename)
             }
 
             ACTION_PAUSE -> {
-                Log.d(TAG, "Pause requested")
-                pauseFlag.set(true)
+                if (!isPaused) {
+                    pauseRequested.set(true)
+                    isPaused = true
+                    currentFilename?.let {
+                        NotificationHelper.updateNotification(this, it, 0, true, true, null)
+                    }
+                    broadcast("paused")
+                }
+            }
+
+            ACTION_RESUME -> {
+                if (isPaused && currentUrl != null && currentFile != null) {
+                    pauseRequested.set(false)
+                    isPaused = false
+                    resumeDownload(currentUrl!!, currentFilename!!, currentFile!!)
+                }
             }
 
             ACTION_CANCEL -> {
-                Log.d(TAG, "Cancel requested")
-                cancelFlag.set(true)
+                cancelRequested.set(true)
+                currentFile?.takeIf { it.exists() }?.delete()
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                broadcast("canceled")
             }
         }
-
         return START_STICKY
     }
 
-    private fun broadcast(status: String, downloaded: Long = 0, total: Long = -1) {
-        Log.d(TAG, "Broadcasting: status=$status, downloaded=$downloaded, total=$total")
-        val i = Intent(BROADCAST_PROGRESS).apply {
-            putExtra(EXTRA_STATUS, status)
-            putExtra(EXTRA_DOWNLOADED, downloaded)
-            putExtra(EXTRA_TOTAL, total)
-        }
-        sendBroadcast(i)
-    }
-
     private fun startDownload(url: String, filename: String) {
-        // Cancel any existing download
         serviceJob?.cancel()
+        pauseRequested.set(false)
+        cancelRequested.set(false)
 
-        pauseFlag.set(false)
-        cancelFlag.set(false)
+        val dir = File(getExternalFilesDir(null), "downloads").apply { mkdirs() }
+        val file = File(dir, filename)
+        currentFile = file
+        downloadedSoFar = 0L
 
-        val downloadsDir = File(getExternalFilesDir(null), "downloads")
-        if (!downloadsDir.exists()) {
-            downloadsDir.mkdirs()
-        }
-
-        val dest = File(downloadsDir, filename)
-        Log.d(TAG, "Download destination: ${dest.absolutePath}")
-
-        // Start foreground service with notification
-        try {
-            startForeground(
-                NotificationHelper.NOTIF_ID,
-                NotificationHelper.buildProgressNotification(
-                    this,
-                    filename,
-                    progressPercent = 0,
-                    indeterminate = true
-                )
-            )
-            Log.d(TAG, "Foreground service started")
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to start foreground service", e)
-            broadcast("error")
-            stopSelf()
-            return
-        }
+        // Always start foreground first
+        startForeground(
+            NotificationHelper.NOTIF_ID,
+            NotificationHelper.buildDownloadNotification(this, filename, 0, true, false)
+        )
 
         serviceJob = CoroutineScope(Dispatchers.IO).launch {
-            try {
-                Log.d(TAG, "Starting download coroutine")
-                broadcast("progress", 0, -1)
+            downloader.download(
+                url = url,
+                output = file,
+                startFrom = 0L,
+                progressCallback = { downloaded, total ->
+                    downloadedSoFar = downloaded
+                    totalSize = total
+                    val percent = if (total > 0) (downloaded * 100 / total).toInt() else 0
 
-                downloader.download(
-                    url = url,
-                    output = dest,
-                    progressCallback = { downloaded, total ->
-                        if (pauseFlag.get()) {
-                            Log.d(TAG, "Pause flag detected")
-                            throw Exception("Paused")
-                        }
-                        if (cancelFlag.get()) {
-                            Log.d(TAG, "Cancel flag detected")
-                            throw Exception("Canceled")
-                        }
+                    NotificationHelper.updateNotification(
+                        this@DownloadForegroundService,
+                        filename,
+                        percent,
+                        false,
+                        isPaused,
+                        null
+                    )
+                    broadcast("progress", downloaded, total)
 
-                        val percent = if (total > 0) ((downloaded * 100) / total).toInt() else 0
+                    // Return false = continue downloading?
+                    !pauseRequested.get() && !cancelRequested.get()
+                },
+                cancelChecker = { cancelRequested.get() }
+            )
 
-                        // Update notification - can be called from any thread
-                        NotificationHelper.updateProgress(
-                            this@DownloadForegroundService,
-                            filename,
-                            percent,
-                            total <= 0
-                        )
-
-                        broadcast("progress", downloaded, total)
-                    },
-                    cancelChecker = { cancelFlag.get() }
-                )
-
-                Log.d(TAG, "Download completed successfully")
-
-                // Show completion notification - can be called from any thread
-                NotificationHelper.showCompleted(
+            // Only reach here if download finished naturally
+            if (!cancelRequested.get()) {
+                NotificationHelper.updateNotification(
                     this@DownloadForegroundService,
                     filename,
-                    dest.absolutePath
+                    100,
+                    false,
+                    false,
+                    file.absolutePath
                 )
-
-                broadcast("completed", dest.length(), dest.length())
-
-            } catch (e: Exception) {
-                Log.e(TAG, "Download failed", e)
-
-                when (e.message) {
-                    "Paused" -> broadcast("paused")
-                    "Canceled" -> {
-                        broadcast("canceled")
-                        if (dest.exists()) dest.delete()
-                    }
-
-                    else -> broadcast("error")
-                }
-
-            } finally {
-                Log.d(TAG, "Download finished – keeping notification")
-                // Do NOT call stopForeground(true) → keep the completion notification alive
-                // Do NOT call stopSelf() immediately → let user dismiss it
-                // Optional: change icon to "done" and make it cancellable
-                NotificationHelper.showCompleted(
-                    this@DownloadForegroundService,
-                    filename,
-                    dest.absolutePath
-                )
-
-                // Only stop foreground after 30 seconds so user can see it
-                CoroutineScope(Dispatchers.Main).launch {
-                    delay(30000)  // keep for 30 seconds
-                    stopForeground(true)
-                    stopSelf()
-                }
+                broadcast("completed", file.length(), file.length())
+                delay(60000)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
             }
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        Log.d(TAG, "Service onDestroy")
+    private fun resumeDownload(url: String, filename: String, file: File) {
         serviceJob?.cancel()
-    }
-}
+        pauseRequested.set(false)
+        cancelRequested.set(false)
 
+        // Re-start foreground with correct state
+        startForeground(
+            NotificationHelper.NOTIF_ID,
+            NotificationHelper.buildDownloadNotification(this, filename, 0, true, false)
+        )
+
+        serviceJob = CoroutineScope(Dispatchers.IO).launch {
+            downloader.download(
+                url = url,
+                output = file,
+                startFrom = downloadedSoFar,
+                progressCallback = { added, total ->
+                    val currentTotal = downloadedSoFar + added
+                    val percent = if (total > 0) (currentTotal * 100 / total).toInt() else 0
+
+                    NotificationHelper.updateNotification(
+                        this@DownloadForegroundService,
+                        filename,
+                        percent,
+                        false,
+                        false,
+                        null
+                    )
+                    broadcast("progress", currentTotal, total)
+
+                    !pauseRequested.get() && !cancelRequested.get()
+                },
+                cancelChecker = { cancelRequested.get() }
+            )
+
+            if (!cancelRequested.get()) {
+                NotificationHelper.updateNotification(
+                    this@DownloadForegroundService,
+                    filename,
+                    100,
+                    false,
+                    false,
+                    file.absolutePath
+                )
+                broadcast("completed", file.length(), file.length())
+                delay(60000)
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
+        }
+    }
+
+    private fun broadcast(status: String, downloaded: Long = 0L, total: Long = -1L) {
+        sendBroadcast(Intent(BROADCAST_PROGRESS).apply {
+            putExtra(EXTRA_STATUS, status)
+            putExtra(EXTRA_DOWNLOADED, downloaded)
+            putExtra(EXTRA_TOTAL, total)
+        })
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        NotificationHelper.createChannel(this)
+    }
+
+    override fun onDestroy() {
+        serviceJob?.cancel()
+        super.onDestroy()
+    }
+
+    override fun onBind(intent: Intent?): IBinder? = null
+}

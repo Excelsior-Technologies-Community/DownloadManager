@@ -1,9 +1,7 @@
 package com.ext.download_manager
 
 import android.util.Log
-import java.io.File
-import java.io.FileOutputStream
-import java.io.InputStream
+import java.io.*
 import java.net.HttpURLConnection
 import java.net.URL
 
@@ -11,84 +9,77 @@ class Downloader {
 
     companion object {
         private const val TAG = "Downloader"
-        private const val BUFFER_SIZE = 8 * 1024 // 8KB
-        private const val TIMEOUT = 30000 // 30 seconds
+        private const val BUFFER_SIZE = 8 * 1024
+        private const val TIMEOUT = 30000
     }
 
+    // Returns true if download was paused/canceled
     fun download(
         url: String,
         output: File,
-        progressCallback: (downloaded: Long, total: Long) -> Unit,
+        startFrom: Long = 0L,
+        progressCallback: (downloaded: Long, total: Long) -> Boolean,  // return true = continue, false = stop
         cancelChecker: () -> Boolean
-    ) {
+    ): Boolean {
         var connection: HttpURLConnection? = null
         var inputStream: InputStream? = null
-        var outputStream: FileOutputStream? = null
+        var outputStream: RandomAccessFile? = null
+        var lastProgressUpdate = System.currentTimeMillis()
 
         try {
-            Log.d(TAG, "Starting download from: $url")
-
-            val urlConnection = URL(url).openConnection() as HttpURLConnection
-            connection = urlConnection
-
+            connection = URL(url).openConnection() as HttpURLConnection
             connection.connectTimeout = TIMEOUT
             connection.readTimeout = TIMEOUT
-            connection.requestMethod = "GET"
-            connection.connect()
 
-            val responseCode = connection.responseCode
-            Log.d(TAG, "Response code: $responseCode")
-
-            if (responseCode !in 200..299) {
-                throw Exception("HTTP error: $responseCode")
+            if (startFrom > 0) {
+                connection.setRequestProperty("Range", "bytes=$startFrom-")
             }
 
-            val total = connection.contentLengthLong
-            Log.d(TAG, "Content length: $total bytes")
+            connection.connect()
 
+            if (connection.responseCode !in 200..299 && connection.responseCode != 206) {
+                Log.e(TAG, "HTTP ${connection.responseCode}")
+                return false
+            }
+
+            val total = connection.contentLengthLong.coerceAtLeast(0L) + startFrom
             inputStream = connection.inputStream
-            outputStream = FileOutputStream(output)
+            outputStream = RandomAccessFile(output, "rw")
+            outputStream.seek(startFrom)
 
             val buffer = ByteArray(BUFFER_SIZE)
             var bytesRead: Int
-            var downloaded = 0L
-            var lastProgressUpdate = System.currentTimeMillis()
+            var downloaded = startFrom
 
             while (inputStream.read(buffer).also { bytesRead = it } != -1) {
                 if (cancelChecker()) {
-                    Log.d(TAG, "Download cancelled by checker")
-                    break
+                    Log.d(TAG, "Download canceled")
+                    return false
                 }
 
                 outputStream.write(buffer, 0, bytesRead)
                 downloaded += bytesRead
 
-                // Update progress every 500ms to avoid too many updates
                 val now = System.currentTimeMillis()
                 if (now - lastProgressUpdate > 500) {
-                    progressCallback(downloaded, total)
+                    if (!progressCallback(downloaded, total)) {
+                        Log.d(TAG, "Download paused by user")
+                        return true  // paused, not canceled
+                    }
                     lastProgressUpdate = now
                 }
             }
 
-            // Final progress update
             progressCallback(downloaded, total)
-
-            outputStream.flush()
-            Log.d(TAG, "Download completed: $downloaded bytes")
+            return false // completed
 
         } catch (e: Exception) {
-            Log.e(TAG, "Download error", e)
-            throw e
+            Log.e(TAG, "Download failed", e)
+            return false
         } finally {
-            try {
-                inputStream?.close()
-                outputStream?.close()
-                connection?.disconnect()
-            } catch (e: Exception) {
-                Log.e(TAG, "Error closing resources", e)
-            }
+            inputStream?.close()
+            outputStream?.close()
+            connection?.disconnect()
         }
     }
 }
-
