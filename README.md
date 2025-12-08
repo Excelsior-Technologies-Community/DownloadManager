@@ -114,58 +114,6 @@ if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
     startService(intent)
 }
 ```
-
-### 2. Pause / Resume / Cancel
-
-```kotlin
-// Pause
-startService(Intent(this, DownloadForegroundService::class.java).apply {
-    action = DownloadForegroundService.ACTION_PAUSE
-})
-
-// Resume (automatically resumes last download)
-startService(Intent(this, DownloadForegroundService::class.java).apply {
-    action = DownloadForegroundService.ACTION_RESUME
-})
-
-// Cancel (deletes file)
-startService(Intent(this, DownloadForegroundService::class.java).apply {
-    action = DownloadForegroundService.ACTION_CANCEL
-})
-```
-
-### 3. Listen to Progress (in Activity/Fragment)
-
-```kotlin
-private val downloadReceiver = object : BroadcastReceiver() {
-    override fun onReceive(context: Context?, intent: Intent?) {
-        when (intent?.getStringExtra(DownloadForegroundService.EXTRA_STATUS)) {
-            "progress" -> {
-                val downloaded = intent.getLongExtra(DownloadForegroundService.EXTRA_DOWNLOADED, 0L)
-                val total = intent.getLongExtra(DownloadForegroundService.EXTRA_TOTAL, -1L)
-                val percent = if (total > 0) (downloaded * 100 / total) else 0
-                tvProgress.text = "Downloading: $percent% (${formatBytes(downloaded)} / ${formatBytes(total)})"
-            }
-            "completed" -> {
-                Toast.makeText(this@MainActivity, "Download Completed!", Toast.LENGTH_LONG).show()
-            }
-            "paused" -> tvProgress.text = "Paused"
-            "canceled" -> tvProgress.text = "Canceled"
-        }
-    }
-}
-
-override fun onStart() {
-    super.onStart()
-    registerReceiver(downloadReceiver, IntentFilter(DownloadForegroundService.BROADCAST_PROGRESS))
-}
-
-override fun onStop() {
-    super.onStop()
-    unregisterReceiver(downloadReceiver)
-}
-```
-
 ---
 ## Actions & Extras
 
