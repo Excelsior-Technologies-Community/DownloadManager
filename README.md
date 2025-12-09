@@ -100,20 +100,81 @@ Create `res/xml/file_paths.xml`:
 ---
 ## Usage
 
-### 1. Start a Download
+
+
+---
+
+## 🔒 Notification Permission (Android 13+ Required)
+
+Add this code inside your Activity:
 
 ```kotlin
-val intent = Intent(this, DownloadForegroundService::class.java).apply {
-    action = DownloadForegroundService.ACTION_START
-    putExtra(DownloadForegroundService.EXTRA_URL, "https://example.com/large-file.zip")
-    putExtra(DownloadForegroundService.EXTRA_FILENAME, "MyVideo.mp4") // optional
+private val NOTIFICATION_PERMISSION_CODE = 1001
+
+private fun hasNotificationPermission(): Boolean {
+    return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS
+        ) == PackageManager.PERMISSION_GRANTED
+    } else true
 }
-if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-    startForegroundService(intent)
-} else {
-    startService(intent)
+
+private fun requestNotificationPermission() {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+        ActivityCompat.requestPermissions(
+            this,
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+            NOTIFICATION_PERMISSION_CODE
+        )
+    }
+}
+
+override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray
+) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+
+    if (requestCode == NOTIFICATION_PERMISSION_CODE) {
+        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
+            Toast.makeText(this, "Notification permission granted", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(this, "Notification permission denied", Toast.LENGTH_SHORT).show()
+        }
+    }
 }
 ```
+
+## 🧩 Usage
+
+### **1. Start a Download**
+
+```kotlin
+binding.btnDownload.setOnClickListener {
+
+    // Step 1: Check Notification Permission (Android 13+)
+    if (!hasNotificationPermission()) {
+        requestNotificationPermission()
+        return@setOnClickListener
+    }
+
+    // Step 2: Start Download Service
+    val intent = Intent(this, DownloadForegroundService::class.java).apply {
+        action = DownloadForegroundService.ACTION_START
+        putExtra(DownloadForegroundService.EXTRA_URL, "https://example.com/large-file.zip")
+        putExtra(DownloadForegroundService.EXTRA_FILENAME, "MyVideo.mp4") // optional
+    }
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+        startForegroundService(intent)
+    } else {
+        startService(intent)
+    }
+}
+```
+
 ---
 ## Actions & Extras
 
